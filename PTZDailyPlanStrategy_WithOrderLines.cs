@@ -37,19 +37,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private bool dailyLimitReached;
 		private Dictionary<double, DateTime> levelLastTradeTime;
 
-		private double contract1ExitPrice;
-		private double contract2StopPrice;
 		private double contract1StopPrice;
-		private double contract2ExitPrice;
+		private double contract2StopPrice;
+		private double contract1TargetPrice;
+		private double contract2TargetPrice;
 		private bool contract1Exited;
 		private bool contract2Exited;
+		private bool contract1BreakevenSet;
 		private bool contract2BreakevenSet;
-
-
-		private Order c1StopOrder;
-		private Order c2StopOrder;
-		private Order c1TargetOrder;
-		private Order c2TargetOrder;
+		private double entryPrice;
 
 		private string c1StopTag = "C1_Stop_OL";
 		private string c2StopTag = "C2_Stop_OL";
@@ -151,18 +147,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 				dailyLimitReached = false;
 				levelLastTradeTime = new Dictionary<double, DateTime>();
 
-				contract1ExitPrice = 0;
-				contract2StopPrice = 0;
 				contract1StopPrice = 0;
-				contract2ExitPrice = 0;
+				contract2StopPrice = 0;
+				contract1TargetPrice = 0;
+				contract2TargetPrice = 0;
 				contract1Exited = false;
 				contract2Exited = false;
+				contract1BreakevenSet = false;
 				contract2BreakevenSet = false;
-
-				c1StopOrder = null;
-				c2StopOrder = null;
-				c1TargetOrder = null;
-				c2TargetOrder = null;
+				entryPrice = 0;
 			}
 		}
 
@@ -209,7 +202,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				if (Position.MarketPosition != MarketPosition.Flat)
 				{
-					ManageOrderLineExits();
+					SyncOrderLinesFromChart();
+					ManageTrailingStops(currentPrice);
+					CheckOrderLineExits(currentPrice);
 				}
 
 				if (Position.MarketPosition == MarketPosition.Flat)
@@ -228,52 +223,217 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 		}
 
-		private void ManageOrderLineExits()
+		private void SyncOrderLinesFromChart()
 		{
 			try
 			{
-				double currentPrice = Close[0];
-				double entryPrice = Position.AveragePrice;
+				if (DrawObjects == null)
+					return;
 
+				var c1StopLine = DrawObjects.FirstOrDefault(d => d.Tag == c1StopTag);
+				if (c1StopLine != null && !contract1Exited)
+				{
+					double linePrice = GetHorizontalLinePrice(c1StopLine);
+					if (linePrice > 0)
+					{
+						contract1StopPrice = linePrice;
+					}
+				}
+
+				var c2StopLine = DrawObjects.FirstOrDefault(d => d.Tag == c2StopTag);
+				if (c2StopLine != null && !contract2Exited)
+				{
+					double linePrice = GetHorizontalLinePrice(c2StopLine);
+					if (linePrice > 0)
+					{
+						contract2StopPrice = linePrice;
+					}
+				}
+
+				var c1TargetLine = DrawObjects.FirstOrDefault(d => d.Tag == c1TargetTag);
+				if (c1TargetLine != null && !contract1Exited)
+				{
+					double linePrice = GetHorizontalLinePrice(c1TargetLine);
+					if (linePrice > 0)
+					{
+						contract1TargetPrice = linePrice;
+					}
+				}
+
+				var c2TargetLine = DrawObjects.FirstOrDefault(d => d.Tag == c2TargetTag);
+				if (c2TargetLine != null && !contract2Exited)
+				{
+					double linePrice = GetHorizontalLinePrice(c2TargetLine);
+					if (linePrice > 0)
+					{
+						contract2TargetPrice = linePrice;
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				Print(string.Format("{0}: ERROR in SyncOrderLinesFromChart: {1}", Time[0], ex.Message));
+			}
+		}
+
+		private double GetHorizontalLinePrice(IDrawingTool drawObject)
+		{
+			try
+			{
+				var objType = drawObject.GetType();
+				var startAnchorProp = objType.GetProperty("StartAnchor");
+				if (startAnchorProp != null)
+				{
+					var startAnchor = startAnchorProp.GetValue(drawObject);
+					if (startAnchor != null)
+					{
+						var priceProp = startAnchor.GetType().GetProperty("Price");
+						if (priceProp != null)
+						{
+							return (double)priceProp.GetValue(startAnchor);
+						}
+					}
+				}
+			}
+			catch
+			{
+			}
+			return 0;
+		}
+
+		private void ManageTrailingStops(double currentPrice)
+		{
+			try
+			{
+				if (entryPrice == 0)
+					return;
+
+				double profitTicks = 0;
+
+				if (Position.MarketPosition == MarketPosition.Long)
+				{
+					profitTicks = (currentPrice - entryPrice) / TickSize;
+
+					if (NumberOfContracts == 2 && !contract1Exited && !contract1BreakevenSet)
+					{
+						if (profitTicks >= Contract1BreakevenTicks)
+						{
+							contract1StopPrice = entryPrice;
+							contract1BreakevenSet = true;
+							UpdateOrderLine(c1StopTag, contract1StopPrice, Brushes.Yellow);
+							Print(string.Format("{0}: LONG C1 moved to breakeven at {1:F2}", Time[0], contract1StopPrice));
+						}
+					}
+
+					if (!contract2Exited && !contract2BreakevenSet)
+					{
+						if (profitTicks >= Contract2BreakevenTicks)
+						{
+							contract2StopPrice = entryPrice;
+							contract2BreakevenSet = true;
+							UpdateOrderLine(c2StopTag, contract2StopPrice, Brushes.Yellow);
+							Print(string.Format("{0}: LONG C2 moved to breakeven at {1:F2}", Time[0], contract2StopPrice));
+						}
+					}
+
+					if (!contract2Exited && contract2BreakevenSet)
+					{
+						double trailStopPrice = currentPrice - (Contract2TrailTicks * TickSize);
+						if (trailStopPrice > contract2StopPrice)
+						{
+							contract2StopPrice = trailStopPrice;
+							UpdateOrderLine(c2StopTag, contract2StopPrice, Brushes.Orange);
+							Print(string.Format("{0}: LONG C2 trailing stop updated to {1:F2}", Time[0], contract2StopPrice));
+						}
+					}
+				}
+				else if (Position.MarketPosition == MarketPosition.Short)
+				{
+					profitTicks = (entryPrice - currentPrice) / TickSize;
+
+					if (NumberOfContracts == 2 && !contract1Exited && !contract1BreakevenSet)
+					{
+						if (profitTicks >= Contract1BreakevenTicks)
+						{
+							contract1StopPrice = entryPrice;
+							contract1BreakevenSet = true;
+							UpdateOrderLine(c1StopTag, contract1StopPrice, Brushes.Yellow);
+							Print(string.Format("{0}: SHORT C1 moved to breakeven at {1:F2}", Time[0], contract1StopPrice));
+						}
+					}
+
+					if (!contract2Exited && !contract2BreakevenSet)
+					{
+						if (profitTicks >= Contract2BreakevenTicks)
+						{
+							contract2StopPrice = entryPrice;
+							contract2BreakevenSet = true;
+							UpdateOrderLine(c2StopTag, contract2StopPrice, Brushes.Yellow);
+							Print(string.Format("{0}: SHORT C2 moved to breakeven at {1:F2}", Time[0], contract2StopPrice));
+						}
+					}
+
+					if (!contract2Exited && contract2BreakevenSet)
+					{
+						double trailStopPrice = currentPrice + (Contract2TrailTicks * TickSize);
+						if (contract2StopPrice == 0 || trailStopPrice < contract2StopPrice)
+						{
+							contract2StopPrice = trailStopPrice;
+							UpdateOrderLine(c2StopTag, contract2StopPrice, Brushes.Orange);
+							Print(string.Format("{0}: SHORT C2 trailing stop updated to {1:F2}", Time[0], contract2StopPrice));
+						}
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				Print(string.Format("{0}: ERROR in ManageTrailingStops: {1}", Time[0], ex.Message));
+			}
+		}
+
+		private void CheckOrderLineExits(double currentPrice)
+		{
+			try
+			{
 				if (Position.MarketPosition == MarketPosition.Long)
 				{
 					if (NumberOfContracts == 2 && Position.Quantity >= 2 && !contract1Exited)
 					{
-						if (c1StopOrder != null && currentPrice <= c1StopOrder.StopPrice)
+						if (contract1StopPrice > 0 && currentPrice <= contract1StopPrice)
 						{
 							ExitLong(1, "C1_Stop", "");
 							contract1Exited = true;
 							RemoveOrderLine(c1StopTag);
 							RemoveOrderLine(c1TargetTag);
-							Print(string.Format("{0}: LONG C1 stopped out at {1:F2}", Time[0], c1StopOrder.StopPrice));
+							Print(string.Format("{0}: LONG C1 stopped out at {1:F2}", Time[0], currentPrice));
 						}
-						else if (c1TargetOrder != null && currentPrice >= c1TargetOrder.LimitPrice)
+						else if (contract1TargetPrice > 0 && currentPrice >= contract1TargetPrice)
 						{
 							ExitLong(1, "C1_Target", "");
 							contract1Exited = true;
 							RemoveOrderLine(c1StopTag);
 							RemoveOrderLine(c1TargetTag);
-							Print(string.Format("{0}: LONG C1 target hit at {1:F2}", Time[0], c1TargetOrder.LimitPrice));
+							Print(string.Format("{0}: LONG C1 target hit at {1:F2}", Time[0], currentPrice));
 						}
 					}
 
 					if (Position.Quantity >= 1 && !contract2Exited)
 					{
-						if (c2StopOrder != null && currentPrice <= c2StopOrder.StopPrice)
+						if (contract2StopPrice > 0 && currentPrice <= contract2StopPrice)
 						{
 							ExitLong("C2_Stop", "");
 							contract2Exited = true;
 							RemoveOrderLine(c2StopTag);
 							RemoveOrderLine(c2TargetTag);
-							Print(string.Format("{0}: LONG C2 stopped out at {1:F2}", Time[0], c2StopOrder.StopPrice));
+							Print(string.Format("{0}: LONG C2 stopped out at {1:F2}", Time[0], currentPrice));
 						}
-						else if (c2TargetOrder != null && currentPrice >= c2TargetOrder.LimitPrice)
+						else if (contract2TargetPrice > 0 && currentPrice >= contract2TargetPrice)
 						{
 							ExitLong("C2_Target", "");
 							contract2Exited = true;
 							RemoveOrderLine(c2StopTag);
 							RemoveOrderLine(c2TargetTag);
-							Print(string.Format("{0}: LONG C2 target hit at {1:F2}", Time[0], c2TargetOrder.LimitPrice));
+							Print(string.Format("{0}: LONG C2 target hit at {1:F2}", Time[0], currentPrice));
 						}
 					}
 				}
@@ -281,258 +441,48 @@ namespace NinjaTrader.NinjaScript.Strategies
 				{
 					if (NumberOfContracts == 2 && Position.Quantity >= 2 && !contract1Exited)
 					{
-						if (c1StopOrder != null && currentPrice >= c1StopOrder.StopPrice)
+						if (contract1StopPrice > 0 && currentPrice >= contract1StopPrice)
 						{
 							ExitShort(1, "C1_Stop", "");
 							contract1Exited = true;
 							RemoveOrderLine(c1StopTag);
 							RemoveOrderLine(c1TargetTag);
-							Print(string.Format("{0}: SHORT C1 stopped out at {1:F2}", Time[0], c1StopOrder.StopPrice));
+							Print(string.Format("{0}: SHORT C1 stopped out at {1:F2}", Time[0], currentPrice));
 						}
-						else if (c1TargetOrder != null && currentPrice <= c1TargetOrder.LimitPrice)
+						else if (contract1TargetPrice > 0 && currentPrice <= contract1TargetPrice)
 						{
 							ExitShort(1, "C1_Target", "");
 							contract1Exited = true;
 							RemoveOrderLine(c1StopTag);
 							RemoveOrderLine(c1TargetTag);
-							Print(string.Format("{0}: SHORT C1 target hit at {1:F2}", Time[0], c1TargetOrder.LimitPrice));
+							Print(string.Format("{0}: SHORT C1 target hit at {1:F2}", Time[0], currentPrice));
 						}
 					}
 
 					if (Position.Quantity >= 1 && !contract2Exited)
 					{
-						if (c2StopOrder != null && currentPrice >= c2StopOrder.StopPrice)
+						if (contract2StopPrice > 0 && currentPrice >= contract2StopPrice)
 						{
 							ExitShort("C2_Stop", "");
 							contract2Exited = true;
 							RemoveOrderLine(c2StopTag);
 							RemoveOrderLine(c2TargetTag);
-							Print(string.Format("{0}: SHORT C2 stopped out at {1:F2}", Time[0], c2StopOrder.StopPrice));
+							Print(string.Format("{0}: SHORT C2 stopped out at {1:F2}", Time[0], currentPrice));
 						}
-						else if (c2TargetOrder != null && currentPrice <= c2TargetOrder.LimitPrice)
+						else if (contract2TargetPrice > 0 && currentPrice <= contract2TargetPrice)
 						{
 							ExitShort("C2_Target", "");
 							contract2Exited = true;
 							RemoveOrderLine(c2StopTag);
 							RemoveOrderLine(c2TargetTag);
-							Print(string.Format("{0}: SHORT C2 target hit at {1:F2}", Time[0], c2TargetOrder.LimitPrice));
+							Print(string.Format("{0}: SHORT C2 target hit at {1:F2}", Time[0], currentPrice));
 						}
 					}
 				}
 			}
 			catch (Exception ex)
 			{
-				Print(string.Format("{0}: ERROR in ManageOrderLineExits: {1}", Time[0], ex.Message));
-			}
-		}
-
-		private void CreateOrderLines()
-		{
-			if (ChartControl == null || State != State.Realtime)
-				return;
-
-			try
-			{
-				double entryPrice = Position.AveragePrice;
-				double currentPrice = Close[0];
-
-				if (Position.MarketPosition == MarketPosition.Long)
-				{
-					if (NumberOfContracts == 2 && !contract1Exited)
-					{
-						double c1Stop = entryPrice - (Contract1InitialStopTicks * TickSize);
-						double c1Target = entryPrice + (Contract1ScalpTicks * TickSize);
-
-						if (ValidateStopPrice(c1Stop, currentPrice, true))
-						{
-							c1StopOrder = new Order();
-							c1StopOrder.StopPrice = c1Stop;
-							c1StopOrder.Name = "C1_Stop";
-							DrawOrderLine(c1StopTag, c1Stop, Brushes.Red, true);
-						}
-
-						if (ValidateLimitPrice(c1Target, currentPrice, true))
-						{
-							c1TargetOrder = new Order();
-							c1TargetOrder.LimitPrice = c1Target;
-							c1TargetOrder.Name = "C1_Target";
-							DrawOrderLine(c1TargetTag, c1Target, Brushes.LimeGreen, false);
-						}
-					}
-
-					if (!contract2Exited)
-					{
-						double c2Stop = entryPrice - (Contract2InitialStopTicks * TickSize);
-						double c2Target = entryPrice + (Contract2TargetTicks * TickSize);
-
-						if (ValidateStopPrice(c2Stop, currentPrice, true))
-						{
-							c2StopOrder = new Order();
-							c2StopOrder.StopPrice = c2Stop;
-							c2StopOrder.Name = "C2_Stop";
-							DrawOrderLine(c2StopTag, c2Stop, Brushes.Orange, true);
-						}
-
-						if (ValidateLimitPrice(c2Target, currentPrice, true))
-						{
-							c2TargetOrder = new Order();
-							c2TargetOrder.LimitPrice = c2Target;
-							c2TargetOrder.Name = "C2_Target";
-							DrawOrderLine(c2TargetTag, c2Target, Brushes.Cyan, false);
-						}
-					}
-				}
-				else if (Position.MarketPosition == MarketPosition.Short)
-				{
-					if (NumberOfContracts == 2 && !contract1Exited)
-					{
-						double c1Stop = entryPrice + (Contract1InitialStopTicks * TickSize);
-						double c1Target = entryPrice - (Contract1ScalpTicks * TickSize);
-
-						if (ValidateStopPrice(c1Stop, currentPrice, false))
-						{
-							c1StopOrder = new Order();
-							c1StopOrder.StopPrice = c1Stop;
-							c1StopOrder.Name = "C1_Stop";
-							DrawOrderLine(c1StopTag, c1Stop, Brushes.Red, true);
-						}
-
-						if (ValidateLimitPrice(c1Target, currentPrice, false))
-						{
-							c1TargetOrder = new Order();
-							c1TargetOrder.LimitPrice = c1Target;
-							c1TargetOrder.Name = "C1_Target";
-							DrawOrderLine(c1TargetTag, c1Target, Brushes.LimeGreen, false);
-						}
-					}
-
-					if (!contract2Exited)
-					{
-						double c2Stop = entryPrice + (Contract2InitialStopTicks * TickSize);
-						double c2Target = entryPrice - (Contract2TargetTicks * TickSize);
-
-						if (ValidateStopPrice(c2Stop, currentPrice, false))
-						{
-							c2StopOrder = new Order();
-							c2StopOrder.StopPrice = c2Stop;
-							c2StopOrder.Name = "C2_Stop";
-							DrawOrderLine(c2StopTag, c2Stop, Brushes.Orange, true);
-						}
-
-						if (ValidateLimitPrice(c2Target, currentPrice, false))
-						{
-							c2TargetOrder = new Order();
-							c2TargetOrder.LimitPrice = c2Target;
-							c2TargetOrder.Name = "C2_Target";
-							DrawOrderLine(c2TargetTag, c2Target, Brushes.Cyan, false);
-						}
-					}
-				}
-			}
-			catch (Exception ex)
-			{
-				Print(string.Format("{0}: ERROR creating OrderLines: {1}", Time[0], ex.Message));
-			}
-		}
-
-		private bool ValidateStopPrice(double stopPrice, double currentPrice, bool isLong)
-		{
-			if (isLong)
-			{
-				return stopPrice < currentPrice;
-			}
-			else
-			{
-				return stopPrice > currentPrice;
-			}
-		}
-
-		private bool ValidateLimitPrice(double limitPrice, double currentPrice, bool isLong)
-		{
-			if (isLong)
-			{
-				return limitPrice > currentPrice;
-			}
-			else
-			{
-				return limitPrice < currentPrice;
-			}
-		}
-
-		private void DrawOrderLine(string tag, double price, Brush color, bool isStop)
-		{
-			try
-			{
-				ChartControl.Dispatcher.InvokeAsync(() =>
-				{
-					try
-					{
-						var existingLine = DrawObjects.FirstOrDefault(d => d.Tag == tag);
-						if (existingLine != null)
-						{
-							RemoveDrawObject(tag);
-						}
-
-						Draw.HorizontalLine(this, tag, price, color, DashStyleHelper.Solid, 2);
-
-						var drawnLine = DrawObjects.FirstOrDefault(d => d.Tag == tag);
-						if (drawnLine != null)
-						{
-							drawnLine.IsLocked = false;
-						}
-					}
-					catch (Exception ex)
-					{
-						Print(string.Format("ERROR in DrawOrderLine dispatcher: {0}", ex.Message));
-					}
-				});
-			}
-			catch (Exception ex)
-			{
-				Print(string.Format("ERROR in DrawOrderLine: {0}", ex.Message));
-			}
-		}
-
-		private void RemoveOrderLine(string tag)
-		{
-			try
-			{
-				RemoveDrawObject(tag);
-			}
-			catch
-			{
-			}
-		}
-
-		protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice,
-			int quantity, int filled, double averageFillPrice, OrderState orderState,
-			DateTime time, ErrorCode error, string nativeError)
-		{
-			if (order == null)
-				return;
-
-			try
-			{
-				if (order.Name == "C1_Stop" && c1StopOrder != null)
-				{
-					c1StopOrder.StopPrice = stopPrice;
-				}
-				else if (order.Name == "C2_Stop" && c2StopOrder != null)
-				{
-					c2StopOrder.StopPrice = stopPrice;
-				}
-				else if (order.Name == "C1_Target" && c1TargetOrder != null)
-				{
-					c1TargetOrder.LimitPrice = limitPrice;
-				}
-				else if (order.Name == "C2_Target" && c2TargetOrder != null)
-				{
-					c2TargetOrder.LimitPrice = limitPrice;
-				}
-			}
-			catch (Exception ex)
-			{
-				Print(string.Format("{0}: ERROR in OnOrderUpdate: {1}", Time[0], ex.Message));
+				Print(string.Format("{0}: ERROR in CheckOrderLineExits: {1}", Time[0], ex.Message));
 			}
 		}
 
@@ -544,26 +494,159 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			try
 			{
-				if (execution.Order.OrderAction == OrderAction.Buy &&
-					execution.Order.Name.StartsWith("Buy"))
+				if ((execution.Order.Name == "Buy_Support" || execution.Order.Name == "Sell_Resistance") &&
+					execution.Order.OrderState == OrderState.Filled)
 				{
-					ChartControl.Dispatcher.InvokeAsync(() =>
+					entryPrice = execution.Price;
+
+					if (ChartControl != null)
 					{
-						CreateOrderLines();
-					});
-				}
-				else if (execution.Order.OrderAction == OrderAction.SellShort &&
-					execution.Order.Name.StartsWith("Sell"))
-				{
-					ChartControl.Dispatcher.InvokeAsync(() =>
-					{
-						CreateOrderLines();
-					});
+						ChartControl.Dispatcher.InvokeAsync(() =>
+						{
+							CreateOrderLines();
+						});
+					}
 				}
 			}
 			catch (Exception ex)
 			{
 				Print(string.Format("{0}: ERROR in OnExecutionUpdate: {1}", Time[0], ex.Message));
+			}
+		}
+
+		private void CreateOrderLines()
+		{
+			if (ChartControl == null)
+				return;
+
+			try
+			{
+				double currentPrice = Close[0];
+
+				if (Position.MarketPosition == MarketPosition.Long)
+				{
+					if (NumberOfContracts == 2 && !contract1Exited)
+					{
+						contract1StopPrice = entryPrice - (Contract1InitialStopTicks * TickSize);
+						contract1TargetPrice = entryPrice + (Contract1ScalpTicks * TickSize);
+
+						if (contract1StopPrice < currentPrice)
+						{
+							DrawOrderLine(c1StopTag, contract1StopPrice, Brushes.Red);
+						}
+
+						if (contract1TargetPrice > currentPrice)
+						{
+							DrawOrderLine(c1TargetTag, contract1TargetPrice, Brushes.LimeGreen);
+						}
+					}
+
+					if (!contract2Exited)
+					{
+						contract2StopPrice = entryPrice - (Contract2InitialStopTicks * TickSize);
+						contract2TargetPrice = entryPrice + (Contract2TargetTicks * TickSize);
+
+						if (contract2StopPrice < currentPrice)
+						{
+							DrawOrderLine(c2StopTag, contract2StopPrice, Brushes.Red);
+						}
+
+						if (contract2TargetPrice > currentPrice)
+						{
+							DrawOrderLine(c2TargetTag, contract2TargetPrice, Brushes.Cyan);
+						}
+					}
+				}
+				else if (Position.MarketPosition == MarketPosition.Short)
+				{
+					if (NumberOfContracts == 2 && !contract1Exited)
+					{
+						contract1StopPrice = entryPrice + (Contract1InitialStopTicks * TickSize);
+						contract1TargetPrice = entryPrice - (Contract1ScalpTicks * TickSize);
+
+						if (contract1StopPrice > currentPrice)
+						{
+							DrawOrderLine(c1StopTag, contract1StopPrice, Brushes.Red);
+						}
+
+						if (contract1TargetPrice < currentPrice)
+						{
+							DrawOrderLine(c1TargetTag, contract1TargetPrice, Brushes.LimeGreen);
+						}
+					}
+
+					if (!contract2Exited)
+					{
+						contract2StopPrice = entryPrice + (Contract2InitialStopTicks * TickSize);
+						contract2TargetPrice = entryPrice - (Contract2TargetTicks * TickSize);
+
+						if (contract2StopPrice > currentPrice)
+						{
+							DrawOrderLine(c2StopTag, contract2StopPrice, Brushes.Red);
+						}
+
+						if (contract2TargetPrice < currentPrice)
+						{
+							DrawOrderLine(c2TargetTag, contract2TargetPrice, Brushes.Cyan);
+						}
+					}
+				}
+
+				Print(string.Format("{0}: OrderLines created - Entry: {1:F2}, C1 Stop: {2:F2}, C1 Target: {3:F2}, C2 Stop: {4:F2}, C2 Target: {5:F2}",
+					Time[0], entryPrice, contract1StopPrice, contract1TargetPrice, contract2StopPrice, contract2TargetPrice));
+			}
+			catch (Exception ex)
+			{
+				Print(string.Format("{0}: ERROR creating OrderLines: {1}", Time[0], ex.Message));
+			}
+		}
+
+		private void DrawOrderLine(string tag, double price, Brush color)
+		{
+			try
+			{
+				RemoveDrawObject(tag);
+				Draw.HorizontalLine(this, tag, price, color, DashStyleHelper.Solid, 2);
+
+				var drawnLine = DrawObjects.FirstOrDefault(d => d.Tag == tag);
+				if (drawnLine != null)
+				{
+					drawnLine.IsLocked = false;
+				}
+			}
+			catch (Exception ex)
+			{
+				Print(string.Format("ERROR in DrawOrderLine: {0}", ex.Message));
+			}
+		}
+
+		private void UpdateOrderLine(string tag, double newPrice, Brush color)
+		{
+			try
+			{
+				RemoveDrawObject(tag);
+				Draw.HorizontalLine(this, tag, newPrice, color, DashStyleHelper.Solid, 2);
+
+				var drawnLine = DrawObjects.FirstOrDefault(d => d.Tag == tag);
+				if (drawnLine != null)
+				{
+					drawnLine.IsLocked = false;
+				}
+			}
+			catch (Exception ex)
+			{
+				Print(string.Format("ERROR in UpdateOrderLine: {0}", ex.Message));
+			}
+		}
+
+		private void RemoveOrderLine(string tag)
+		{
+			try
+			{
+				RemoveDrawObject(tag);
+			}
+			catch
+			{
 			}
 		}
 
@@ -581,9 +664,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 					contract1Exited = false;
 					contract2Exited = false;
+					contract1BreakevenSet = false;
 					contract2BreakevenSet = false;
 					contract1StopPrice = 0;
 					contract2StopPrice = 0;
+					contract1TargetPrice = 0;
+					contract2TargetPrice = 0;
+					entryPrice = 0;
 
 					if (EnableLevelCooldown && buyLevelPrice > 0)
 					{
@@ -613,9 +700,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 					contract1Exited = false;
 					contract2Exited = false;
+					contract1BreakevenSet = false;
 					contract2BreakevenSet = false;
 					contract1StopPrice = 0;
 					contract2StopPrice = 0;
+					contract1TargetPrice = 0;
+					contract2TargetPrice = 0;
+					entryPrice = 0;
 
 					if (EnableLevelCooldown && sellLevelPrice > 0)
 					{
@@ -1014,14 +1105,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 					contract1Exited = false;
 					contract2Exited = false;
+					contract1BreakevenSet = false;
 					contract2BreakevenSet = false;
 					contract1StopPrice = 0;
 					contract2StopPrice = 0;
-
-					c1StopOrder = null;
-					c2StopOrder = null;
-					c1TargetOrder = null;
-					c2TargetOrder = null;
+					contract1TargetPrice = 0;
+					contract2TargetPrice = 0;
+					entryPrice = 0;
 
 					RemoveOrderLine(c1StopTag);
 					RemoveOrderLine(c2StopTag);
