@@ -45,9 +45,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private bool contract2Exited;
 		private bool contract2BreakevenSet;
 
-		private NinjaTrader.Gui.Chart.ChartScale chartScale;
-		private NinjaTrader.Gui.Chart.ChartControl chartControl;
-		private System.Windows.Controls.Grid chartTraderGrid;
 
 		private Order c1StopOrder;
 		private Order c2StopOrder;
@@ -166,17 +163,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				c2StopOrder = null;
 				c1TargetOrder = null;
 				c2TargetOrder = null;
-
-				chartScale = null;
-				chartControl = null;
-			}
-			else if (State == State.Historical)
-			{
-				if (ChartControl != null)
-				{
-					chartControl = ChartControl;
-					chartScale = ChartPanel.ChartScale;
-				}
 			}
 		}
 
@@ -493,7 +479,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 						if (drawnLine != null)
 						{
 							drawnLine.IsLocked = false;
-							drawnLine.IsUserDrawn = true;
 						}
 					}
 					catch (Exception ex)
